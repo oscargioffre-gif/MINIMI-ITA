@@ -139,8 +139,13 @@ def get_metadata(ticker: str) -> tuple[str, str]:
 
 
 def get_universe_stats() -> dict:
-    """Statistiche sull'universo per UI."""
+    """Statistiche sull'universo per UI con breakdown per nazionalità ISIN."""
+    italiani = sum(1 for _, isin in TICKER_METADATA.values() if isin.startswith("IT"))
+    olandesi = sum(1 for _, isin in TICKER_METADATA.values() if isin.startswith("NL"))
+    lussemb = sum(1 for _, isin in TICKER_METADATA.values() if isin.startswith("LU"))
     return {
-        "Ticker totali": len(TICKER_METADATA),
-        "Con ISIN": sum(1 for _, isin in TICKER_METADATA.values() if isin and isin != "—"),
+        "Totali": len(TICKER_METADATA),
+        "🇮🇹 Italia": italiani,
+        "🇳🇱 Olanda": olandesi,
+        "🇱🇺 Lussemb.": lussemb,
     }
