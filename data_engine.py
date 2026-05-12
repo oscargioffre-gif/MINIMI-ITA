@@ -1,13 +1,13 @@
 # data_engine.py
 # Engine per download dati Yahoo Finance, calcolo filtri e screening
-# Pattern: ThreadPoolExecutor + cache TTL + gestione errori robusta
+# v2: fix logica NaN 5y, aggiunta ISIN, lookback flessibile
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import streamlit as st
 
@@ -17,10 +17,12 @@ class TickerResult:
     """Risultato analisi singolo ticker."""
     ticker: str
     nome: Optional[str] = None
+    isin: Optional[str] = None
     prezzo_attuale: Optional[float] = None
-    prezzo_5y_ago: Optional[float] = None
+    prezzo_storico: Optional[float] = None
     variazione_pct: Optional[float] = None
-    volume_medio_90d: Optional[float] = None
+    volume_medio: Optional[float] = None
+    anni_lookback: int = 5
     passa_volume: bool = False
     passa_prezzo: bool = False
     passa_screening: bool = False
@@ -35,9 +37,9 @@ def fetch_ticker_history(ticker: str, years_lookback: int = 5) -> Optional[pd.Da
     Restituisce None se i dati sono insufficienti o errore.
     """
     try:
-        # Margine di sicurezza: +30 giorni per gestire weekend/festivi
+        # Margine di sicurezza: +60 giorni per gestire weekend/festivi e calcolo volume
         end = datetime.now()
-        start = end - timedelta(days=years_lookback * 365 + 30)
+        start = end - timedelta(days=years_lookback * 365 + 60)
 
         df = yf.download(
             ticker,
@@ -55,23 +57,40 @@ def fetch_ticker_history(ticker: str, years_lookback: int = 5) -> Optional[pd.Da
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Validazione storico minimo (almeno years_lookback anni)
-        if len(df) < years_lookback * 200:  # ~200 giorni di trading/anno conservativo
-            return None
-
         return df
     except Exception:
         return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_ticker_name(ticker: str) -> str:
-    """Recupera il nome esteso del titolo. Cache 24h."""
+def fetch_ticker_metadata(ticker: str) -> dict:
+    """
+    Recupera nome esteso e ISIN. Cache 24h (dati statici).
+    Restituisce dict con 'nome' e 'isin' (entrambi possono essere None).
+    """
+    result = {"nome": None, "isin": None}
     try:
-        info = yf.Ticker(ticker).info
-        return info.get("longName") or info.get("shortName") or ticker
+        tk = yf.Ticker(ticker)
+        info = tk.info
+        result["nome"] = info.get("longName") or info.get("shortName") or ticker
+
+        # Tenta prima con il campo info, poi con il metodo dedicato isin()
+        isin = info.get("isin")
+        if not isin:
+            try:
+                isin = tk.isin
+            except Exception:
+                isin = None
+
+        # yfinance può restituire "-" se non disponibile
+        if isin and isin != "-":
+            result["isin"] = isin
     except Exception:
-        return ticker
+        pass
+
+    if not result["nome"]:
+        result["nome"] = ticker
+    return result
 
 
 def analyze_ticker(
@@ -79,70 +98,85 @@ def analyze_ticker(
     years_lookback: int = 5,
     min_volume: int = 200_000,
     volume_window: int = 90,
+    fetch_meta: bool = True,
 ) -> TickerResult:
     """
-    Analizza un singolo ticker applicando i filtri di screening:
+    Analizza un singolo ticker applicando i filtri di screening.
     - Volume medio sugli ultimi `volume_window` giorni >= min_volume
     - Prezzo attuale <= Adj Close di `years_lookback` anni fa (ffill su festivi)
     """
-    result = TickerResult(ticker=ticker)
+    result = TickerResult(ticker=ticker, anni_lookback=years_lookback)
 
     df = fetch_ticker_history(ticker, years_lookback=years_lookback)
     if df is None:
-        result.errore = "Dati insufficienti o errore download"
+        result.errore = "Ticker non trovato su Yahoo Finance"
         return result
 
     try:
-        # === FILTRO VOLUME ===
-        if "Volume" not in df.columns:
-            result.errore = "Colonna Volume mancante"
-            return result
+        # === VALIDAZIONE COLONNE ===
+        for col in ("Volume", "Close", "Adj Close"):
+            if col not in df.columns:
+                result.errore = f"Colonna {col} mancante"
+                return result
 
+        # === FILTRO VOLUME ===
         vol_recente = df["Volume"].tail(volume_window)
         if len(vol_recente) < volume_window:
-            result.errore = f"Storico volumi < {volume_window}gg"
+            result.errore = f"Storico volumi < {volume_window}gg (solo {len(vol_recente)}gg)"
             return result
 
         vol_medio = float(vol_recente.mean())
-        result.volume_medio_90d = vol_medio
+        result.volume_medio = vol_medio
         result.passa_volume = vol_medio >= min_volume
 
-        # === FILTRO PREZZO STORICO ===
-        if "Adj Close" not in df.columns or "Close" not in df.columns:
-            result.errore = "Colonne prezzo mancanti"
+        # === VALIDAZIONE STORICO MINIMO ===
+        # Verifica esplicita che lo storico copra il periodo di lookback richiesto
+        prima_data = df.index[0]
+        ultima_data = df.index[-1]
+        target_date = ultima_data - pd.DateOffset(years=years_lookback)
+
+        # Margine: se la prima data disponibile è DOPO la target_date, niente da fare
+        if prima_data > target_date:
+            anni_disponibili = (ultima_data - prima_data).days / 365.25
+            result.errore = (
+                f"Storico insufficiente: solo {anni_disponibili:.1f} anni "
+                f"(richiesti {years_lookback})"
+            )
             return result
 
-        # Forward-fill per gestire festivi/weekend nella data target
+        # === CALCOLO PREZZO STORICO ===
         df_filled = df[["Close", "Adj Close"]].ffill()
 
         prezzo_attuale = float(df_filled["Close"].iloc[-1])
+        if pd.isna(prezzo_attuale):
+            result.errore = "Prezzo attuale NaN"
+            return result
         result.prezzo_attuale = prezzo_attuale
-
-        # Data esattamente N anni fa
-        oggi = df_filled.index[-1]
-        target_date = oggi - pd.DateOffset(years=years_lookback)
 
         # Reindex con ffill per ottenere il valore al target_date anche se festivo
         df_reindexed = df_filled.reindex(
             df_filled.index.union([target_date])
         ).ffill()
 
-        if target_date not in df_reindexed.index:
-            result.errore = "Data target non disponibile"
+        prezzo_storico = df_reindexed.loc[target_date, "Adj Close"]
+        if pd.isna(prezzo_storico):
+            result.errore = f"Prezzo {years_lookback}y fa non calcolabile"
             return result
 
-        prezzo_5y = df_reindexed.loc[target_date, "Adj Close"]
-        if pd.isna(prezzo_5y):
-            result.errore = f"Prezzo {years_lookback}y fa NaN"
-            return result
-
-        prezzo_5y = float(prezzo_5y)
-        result.prezzo_5y_ago = prezzo_5y
-        result.variazione_pct = ((prezzo_attuale - prezzo_5y) / prezzo_5y) * 100
-        result.passa_prezzo = prezzo_attuale <= prezzo_5y
+        prezzo_storico = float(prezzo_storico)
+        result.prezzo_storico = prezzo_storico
+        result.variazione_pct = ((prezzo_attuale - prezzo_storico) / prezzo_storico) * 100
+        result.passa_prezzo = prezzo_attuale <= prezzo_storico
 
         # === ESITO COMPLESSIVO ===
         result.passa_screening = result.passa_volume and result.passa_prezzo
+
+        # === METADATA (nome + ISIN) - solo se il ticker passa il filtro ===
+        # Evitiamo chiamate .info inutili sui ticker scartati per non triggerare rate-limit
+        if fetch_meta and result.passa_screening:
+            meta = fetch_ticker_metadata(ticker)
+            result.nome = meta["nome"]
+            result.isin = meta["isin"]
 
         return result
 
@@ -172,7 +206,7 @@ def run_screening(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ticker = {
             executor.submit(
-                analyze_ticker, t, years_lookback, min_volume, volume_window
+                analyze_ticker, t, years_lookback, min_volume, volume_window, True
             ): t
             for t in tickers
         }
@@ -200,16 +234,17 @@ def results_to_dataframe(results: list[TickerResult]) -> pd.DataFrame:
     for r in results:
         rows.append({
             "Ticker": r.ticker.replace(".MI", ""),
+            "Nome": r.nome or "—",
+            "ISIN": r.isin or "—",
             "Prezzo Attuale (€)": r.prezzo_attuale,
-            "Prezzo 5y fa (€)": r.prezzo_5y_ago,
+            f"Prezzo {r.anni_lookback}y fa (€)": r.prezzo_storico,
             "Variazione %": r.variazione_pct,
-            "Vol. Medio 90gg": r.volume_medio_90d,
+            "Vol. Medio": r.volume_medio,
             "Filtro Volume": "✓" if r.passa_volume else "✗",
             "Filtro Prezzo": "✓" if r.passa_prezzo else "✗",
         })
 
     df = pd.DataFrame(rows)
-    # Ordina per variazione % crescente (i più negativi in cima)
     df = df.sort_values("Variazione %", ascending=True).reset_index(drop=True)
     return df
 

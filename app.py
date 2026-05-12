@@ -1,7 +1,6 @@
 # app.py
-# MILANO 5Y SCREENER - Screener Borsa Italiana
-# Filtra titoli .MI con volume medio 90gg >= soglia E prezzo attuale <= prezzo 5 anni fa
-# Pattern: dark theme, mobile-first, JetBrains Mono + Syne, cache TTL
+# MILANO SCREENER - Screener Borsa Italiana
+# v2: lookback flessibile 3/5/7 anni, colonna ISIN, ticker verificati
 
 import streamlit as st
 import pandas as pd
@@ -16,10 +15,10 @@ from data_engine import (
 
 # === CONFIG PAGINA ===
 st.set_page_config(
-    page_title="Milano 5Y Screener",
+    page_title="Milano Screener",
     page_icon="📉",
     layout="wide",
-    initial_sidebar_state="collapsed",  # Mobile-first
+    initial_sidebar_state="collapsed",
 )
 
 # === CSS PERSONALIZZATO ===
@@ -38,11 +37,8 @@ st.markdown("""
         letter-spacing: -0.02em;
     }
 
-    .stApp {
-        background-color: #000000;
-    }
+    .stApp { background-color: #000000; }
 
-    /* Metric cards */
     [data-testid="stMetric"] {
         background-color: #0a0a0a;
         border: 1px solid #1a1a1a;
@@ -58,7 +54,6 @@ st.markdown("""
         font-size: 1.5rem !important;
     }
 
-    /* Bottoni */
     .stButton > button {
         background-color: #0099ff;
         color: #ffffff;
@@ -68,11 +63,8 @@ st.markdown("""
         font-family: 'JetBrains Mono', monospace;
         width: 100%;
     }
-    .stButton > button:hover {
-        background-color: #38bdf8;
-    }
+    .stButton > button:hover { background-color: #38bdf8; }
 
-    /* Download button */
     .stDownloadButton > button {
         background-color: #1a1a1a;
         color: #38bdf8;
@@ -80,17 +72,9 @@ st.markdown("""
         font-family: 'JetBrains Mono', monospace;
     }
 
-    /* DataFrame */
-    [data-testid="stDataFrame"] {
-        background-color: #0a0a0a;
-    }
+    [data-testid="stDataFrame"] { background-color: #0a0a0a; }
+    [data-testid="stSidebar"] { background-color: #050505; }
 
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #050505;
-    }
-
-    /* Riduci padding mobile */
     .main .block-container {
         padding-top: 1rem;
         padding-bottom: 1rem;
@@ -98,38 +82,31 @@ st.markdown("""
         padding-right: 0.8rem;
     }
 
-    /* Caption / testo secondario */
     .caption-muted {
         color: #7aa8c8;
         font-size: 0.8rem;
     }
 
-    /* Badge */
-    .badge-ok {
-        background-color: #0099ff;
-        color: #ffffff;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 700;
+    /* Segmented control (radio) - look pulsante */
+    div[role="radiogroup"] > label {
+        background-color: #0a0a0a;
+        border: 1px solid #1a1a1a;
+        border-radius: 6px;
+        padding: 6px 12px;
+        margin: 2px;
     }
-    .badge-ko {
-        background-color: #ef4444;
-        color: #ffffff;
-        padding: 2px 8px;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 700;
+    div[role="radiogroup"] > label:hover {
+        border-color: #38bdf8;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
 # === HEADER ===
-st.markdown("# 📉 MILANO 5Y SCREENER")
+st.markdown("# 📉 MILANO SCREENER")
 st.markdown(
-    '<p class="caption-muted">Screening titoli Borsa Italiana — '
-    'Prezzo attuale ≤ Prezzo 5 anni fa + Volume liquido</p>',
+    '<p class="caption-muted">Screening Borsa Italiana — '
+    'Prezzo attuale ≤ Prezzo N anni fa + Volume liquido</p>',
     unsafe_allow_html=True,
 )
 
@@ -139,22 +116,13 @@ with st.sidebar:
     st.markdown("## ⚙️ Parametri")
 
     min_volume = st.slider(
-        "Volume minimo medio (90gg)",
+        "Volume minimo medio",
         min_value=50_000,
         max_value=2_000_000,
         value=200_000,
         step=50_000,
         format="%d",
-        help="Soglia minima sulla media mobile a 90 giorni del volume scambiato",
-    )
-
-    years_lookback = st.slider(
-        "Anni di lookback prezzo",
-        min_value=1,
-        max_value=10,
-        value=5,
-        step=1,
-        help="Confronta il prezzo attuale con quello di N anni fa",
+        help="Soglia minima sulla media mobile del volume scambiato",
     )
 
     volume_window = st.slider(
@@ -186,6 +154,38 @@ with st.sidebar:
         st.success("Cache pulita")
 
 
+# === SELETTORE LOOKBACK (in main area, più visibile) ===
+st.markdown("### 📅 Periodo di confronto")
+col_lb1, col_lb2 = st.columns([3, 2])
+
+with col_lb1:
+    lookback_preset = st.radio(
+        "Minimi di quanti anni?",
+        options=[3, 5, 7, "Custom"],
+        horizontal=True,
+        index=1,  # default 5y
+        label_visibility="collapsed",
+    )
+
+with col_lb2:
+    if lookback_preset == "Custom":
+        years_lookback = st.slider(
+            "Anni custom",
+            min_value=1,
+            max_value=15,
+            value=5,
+            step=1,
+            label_visibility="collapsed",
+        )
+    else:
+        years_lookback = int(lookback_preset)
+        st.markdown(
+            f'<p style="color:#38bdf8; font-weight:700; margin-top:8px;">'
+            f'→ Lookback: {years_lookback} anni</p>',
+            unsafe_allow_html=True,
+        )
+
+
 # === STATO SESSIONE ===
 if "results_ok" not in st.session_state:
     st.session_state.results_ok = []
@@ -193,17 +193,23 @@ if "results_err" not in st.session_state:
     st.session_state.results_err = []
 if "last_run" not in st.session_state:
     st.session_state.last_run = None
+if "last_lookback" not in st.session_state:
+    st.session_state.last_lookback = None
 
 
 # === ESECUZIONE SCREENING ===
 col_btn1, col_btn2 = st.columns([3, 1])
 with col_btn1:
-    run_clicked = st.button("▶️ ESEGUI SCREENING", use_container_width=True)
+    run_clicked = st.button(
+        f"▶️ ESEGUI SCREENING ({years_lookback}Y)",
+        use_container_width=True,
+    )
 with col_btn2:
     if st.session_state.last_run:
         st.markdown(
             f'<p class="caption-muted" style="text-align:right; margin-top:8px;">'
-            f'Ultimo: {st.session_state.last_run.strftime("%H:%M:%S")}</p>',
+            f'Ultimo: {st.session_state.last_run.strftime("%H:%M:%S")}<br>'
+            f'({st.session_state.last_lookback}Y)</p>',
             unsafe_allow_html=True,
         )
 
@@ -215,7 +221,7 @@ if run_clicked:
     def update_progress(done: int, total: int):
         progress_bar.progress(done / total, text=f"Analisi {done}/{total} ticker...")
 
-    with st.spinner("Download e calcolo in corso..."):
+    with st.spinner(f"Download e calcolo lookback {years_lookback} anni..."):
         ok, err = run_screening(
             tickers=universe,
             years_lookback=years_lookback,
@@ -229,15 +235,16 @@ if run_clicked:
     st.session_state.results_ok = ok
     st.session_state.results_err = err
     st.session_state.last_run = datetime.now()
+    st.session_state.last_lookback = years_lookback
     st.rerun()
 
 
 # === RISULTATI ===
 results_ok = st.session_state.results_ok
 results_err = st.session_state.results_err
+last_lb = st.session_state.last_lookback
 
 if results_ok or results_err:
-    # Statistiche
     totale_analizzati = len(results_ok) + len(results_err)
     qualificati = [r for r in results_ok if r.passa_screening]
 
@@ -249,46 +256,52 @@ if results_ok or results_err:
 
     st.markdown("---")
 
-    # Tabella titoli che passano tutti i filtri
-    st.markdown("## 🎯 Titoli Qualificati")
+    # === TABELLA TITOLI QUALIFICATI ===
+    st.markdown(f"## 🎯 Titoli Qualificati ({last_lb}Y)")
     if qualificati:
         df_qual = results_to_dataframe(qualificati)
+        prezzo_storico_col = f"Prezzo {last_lb}y fa (€)"
+
         st.dataframe(
             df_qual,
             use_container_width=True,
             hide_index=True,
             column_config={
+                "Ticker": st.column_config.TextColumn(width="small"),
+                "Nome": st.column_config.TextColumn(width="medium"),
+                "ISIN": st.column_config.TextColumn(width="medium"),
                 "Prezzo Attuale (€)": st.column_config.NumberColumn(format="%.4f"),
-                "Prezzo 5y fa (€)": st.column_config.NumberColumn(format="%.4f"),
+                prezzo_storico_col: st.column_config.NumberColumn(format="%.4f"),
                 "Variazione %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Vol. Medio 90gg": st.column_config.NumberColumn(format="%d"),
+                "Vol. Medio": st.column_config.NumberColumn(format="%d"),
             },
         )
 
-        # Download CSV
         csv = df_qual.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="📥 Scarica CSV Qualificati",
             data=csv,
-            file_name=f"milano_5y_screener_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            file_name=f"milano_{last_lb}y_screener_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
             use_container_width=True,
         )
     else:
         st.info("Nessun titolo passa entrambi i filtri con i parametri attuali.")
 
-    # Tabella tutti gli analizzati (espandibile)
+    # === TABELLA COMPLETA ===
     with st.expander(f"📋 Tutti i titoli analizzati ({len(results_ok)})"):
         df_all = results_to_dataframe(results_ok)
+        prezzo_storico_col = f"Prezzo {last_lb}y fa (€)"
+
         st.dataframe(
             df_all,
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Prezzo Attuale (€)": st.column_config.NumberColumn(format="%.4f"),
-                "Prezzo 5y fa (€)": st.column_config.NumberColumn(format="%.4f"),
+                prezzo_storico_col: st.column_config.NumberColumn(format="%.4f"),
                 "Variazione %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Vol. Medio 90gg": st.column_config.NumberColumn(format="%d"),
+                "Vol. Medio": st.column_config.NumberColumn(format="%d"),
             },
         )
 
@@ -296,16 +309,20 @@ if results_ok or results_err:
         st.download_button(
             label="📥 Scarica CSV Completo",
             data=csv_all,
-            file_name=f"milano_5y_full_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            file_name=f"milano_{last_lb}y_full_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
             use_container_width=True,
         )
 
-    # Debug errori
+    # === DEBUG ===
     with st.expander(f"🐛 Debug — Errori ({len(results_err)})"):
         if results_err:
             df_err = errors_to_dataframe(results_err)
             st.dataframe(df_err, use_container_width=True, hide_index=True)
+            st.caption(
+                "💡 Ticker con 'Storico insufficiente' sono titoli quotati di recente. "
+                "Per testarli, riduci il lookback (es. 3 anni)."
+            )
         else:
             st.success("Nessun errore registrato.")
 
@@ -321,6 +338,6 @@ st.markdown("---")
 st.markdown(
     '<p class="caption-muted" style="text-align:center;">'
     'Dati: Yahoo Finance · Cache: 1h · '
-    f'© {datetime.now().year} Milano 5Y Screener</p>',
+    f'© {datetime.now().year} Milano Screener</p>',
     unsafe_allow_html=True,
 )
